@@ -10,22 +10,25 @@ export const dynamic = "force-dynamic";
 const SECRET_KEYS = new Set<string>();
 
 export async function GET(req: NextRequest) {
-  const settings = await prisma.siteSetting.findMany();
-  const session = await getServerSession(authOptions);
-  const isAdmin = (session?.user as { role?: string } | undefined)?.role === "ADMIN";
+  try {
+    const settings = await prisma.siteSetting.findMany();
+    const session = await getServerSession(authOptions);
+    const isAdmin = (session?.user as { role?: string } | undefined)?.role === "ADMIN";
 
-  const result: Record<string, unknown> = {};
-  for (const s of settings) {
-    // Never expose secret keys to non-admins
-    if (SECRET_KEYS.has(s.key) && !isAdmin) continue;
-
-    try {
-      result[s.key] = JSON.parse(s.value);
-    } catch {
-      result[s.key] = s.value;
+    const result: Record<string, unknown> = {};
+    for (const s of settings) {
+      if (SECRET_KEYS.has(s.key) && !isAdmin) continue;
+      try {
+        result[s.key] = JSON.parse(s.value);
+      } catch {
+        result[s.key] = s.value;
+      }
     }
+    return NextResponse.json(result);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return NextResponse.json({ error: msg }, { status: 500 });
   }
-  return NextResponse.json(result);
 }
 
 export async function PUT(req: NextRequest) {
