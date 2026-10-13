@@ -26,43 +26,38 @@ const BOT_SIGNATURES = [
   "axios", "node-fetch", "got/", "undici", "okhttp",
 ];
 
-const REAL_BROWSER_MARKERS = ["chrome", "safari", "firefox", "edg/", "opr/", "opera"];
-
+// Não exige mais "parecer" com um navegador conhecido (chrome/safari/etc) —
+// isso pegava navegadores internos de app (Instagram, WhatsApp, TikTok...)
+// como se fossem bot. Só bloqueia quem bate com uma assinatura de bot
+// conhecida. Prioriza nunca perder lead real, mesmo aceitando que algum
+// bot não listado passe.
 function isBot(ua: string): boolean {
   if (!ua || ua.length < 10) return true;
   const lower = ua.toLowerCase();
   if (BOT_SIGNATURES.some((sig) => lower.includes(sig))) return true;
-  if (!lower.includes("mozilla")) return true;
-  if (!REAL_BROWSER_MARKERS.some((m) => lower.includes(m))) return true;
   return false;
 }
-
-const VSL_GATE_COOKIE = "_vslok";
 
 export function middleware(req: NextRequest) {
   const ua = req.headers.get("user-agent") || "";
 
-  // Bots: always bounced to the VSL, same as before.
-  if (isBot(ua)) {
+  // Sec-Fetch-* are attached by the browser's own network stack for a real
+  // page navigation — a generic HTTP client (curl, requests, most scrapers)
+  // has no reason to send them, unlike User-Agent, which is just a string
+  // any client can set to whatever it wants. This combination is treated as
+  // proof of a real browser and bypasses the (spoofable) UA check below —
+  // that's what fixes in-app browsers like Instagram's on iOS, whose UA
+  // lacks "chrome"/"safari" but whose Sec-Fetch-* headers look completely
+  // normal, since it's a real WKWebView doing a real navigation.
+  const realNavigation =
+    req.headers.get("sec-fetch-mode") === "navigate" &&
+    req.headers.get("sec-fetch-dest") === "document";
+
+  if (!realNavigation && isBot(ua)) {
     return NextResponse.redirect(SAFE_URL, { status: 302 });
   }
 
-  // Humans: must pass through the VSL first. Real navigation from the VSL's
-  // own button carries a forces-one.com Referer; once that happens we drop a
-  // cookie so the rest of the visit doesn't get bounced on every click.
-  const referer = req.headers.get("referer") || "";
-  const cameFromVSL = referer.includes("forces-one.com");
-  const hasGateCookie = req.cookies.get(VSL_GATE_COOKIE)?.value === "1";
-
-  if (!cameFromVSL && !hasGateCookie) {
-    return NextResponse.redirect(SAFE_URL, { status: 302 });
-  }
-
-  const res = NextResponse.next();
-  if (!hasGateCookie) {
-    res.cookies.set(VSL_GATE_COOKIE, "1", { maxAge: 60 * 60 * 24 * 30, path: "/" });
-  }
-  return res;
+  return NextResponse.next();
 }
 
 export const config = {

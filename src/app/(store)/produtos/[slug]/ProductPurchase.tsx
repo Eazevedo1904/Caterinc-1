@@ -2,7 +2,7 @@
 
 import { useState } from "react";
 import { useRouter } from "next/navigation";
-import { ShoppingCart, Zap, Truck, RotateCcw, ChevronDown, ChevronUp, CreditCard } from "lucide-react";
+import { ShoppingCart, Truck, RotateCcw, ChevronDown, ChevronUp, CreditCard } from "lucide-react";
 import { useCart } from "@/lib/cart-context";
 import { toast } from "@/hooks/use-toast";
 import { formatPrice } from "@/lib/utils";
@@ -28,6 +28,8 @@ interface ProductPurchaseProps {
   };
   variants: Variant[];
   sizes: string[];
+  pixDiscountPct?: number;
+  skipCart?: boolean;
   selectedColorProp?: string;
   colorSwatchMap?: Record<string, string | null>;
   onColorSelect?: (color: string) => void;
@@ -45,7 +47,7 @@ function Stars({ value }: { value: number }) {
   );
 }
 
-export function ProductPurchase({ product, variants, sizes, selectedColorProp, colorSwatchMap, onColorSelect }: ProductPurchaseProps) {
+export function ProductPurchase({ product, variants, sizes, pixDiscountPct = 5, skipCart = false, selectedColorProp, colorSwatchMap, onColorSelect }: ProductPurchaseProps) {
   const router = useRouter();
   const { dispatch } = useCart();
   const [selectedSize, setSelectedSize] = useState("");
@@ -85,7 +87,7 @@ export function ProductPurchase({ product, variants, sizes, selectedColorProp, c
   const price = selectedVariant?.price ? Number(selectedVariant.price) : product.price;
 
   const installmentPrice = price / 12;
-  const pixPrice = price * 0.95;
+  const pixPrice = price * (1 - pixDiscountPct / 100);
 
   const isOutOfStock = (size: string) => {
     const v = variants.find((v) => v.size === size && (!hasColors || v.color === selectedColor));
@@ -98,7 +100,7 @@ export function ProductPurchase({ product, variants, sizes, selectedColorProp, c
     variantId: selectedVariant!.id,
     name: product.name,
     price,
-    image: product.images[0] || "",
+    image: selectedVariant!.images[0] || product.images[0] || "",
     size: selectedVariant!.size,
     color: selectedVariant!.color || "",
     quantity,
@@ -145,9 +147,11 @@ export function ProductPurchase({ product, variants, sizes, selectedColorProp, c
         <p className="text-sm text-gray-600">
           em até <strong className="text-cat-black">12x de {formatPrice(installmentPrice)}</strong> sem juros
         </p>
-        <p className="text-sm text-green-600 font-semibold">
-          ou <strong>{formatPrice(pixPrice)}</strong> no PIX com 5% de desconto
-        </p>
+        {pixDiscountPct > 0 && (
+          <p className="text-sm text-green-600 font-semibold">
+            ou <strong>{formatPrice(pixPrice)}</strong> no PIX com {pixDiscountPct}% de desconto
+          </p>
+        )}
       </div>
 
       {/* Color selector */}
@@ -249,20 +253,21 @@ export function ProductPurchase({ product, variants, sizes, selectedColorProp, c
 
       {/* CTA buttons */}
       <div className="space-y-3">
-        <button
-          onClick={handleAddToCart}
-          className="vep-cart-btn w-full flex items-center justify-center gap-2 py-4 px-6 font-black text-base rounded-xl active:scale-[0.98] transition-all shadow-sm"
-          style={{ backgroundColor: "var(--vep-cart-bg, #FFCD11)", color: "var(--vep-cart-text, #000000)" }}
-        >
-          <ShoppingCart className="w-5 h-5" />
-          Adicionar ao Carrinho
-        </button>
+        {!skipCart && (
+          <button
+            onClick={handleAddToCart}
+            className="vep-cart-btn w-full flex items-center justify-center gap-2 py-4 px-6 font-black text-base rounded-xl active:scale-[0.98] transition-all shadow-sm"
+            style={{ backgroundColor: "var(--vep-cart-bg, #FFCD11)", color: "var(--vep-cart-text, #000000)" }}
+          >
+            <ShoppingCart className="w-5 h-5" />
+            Adicionar ao Carrinho
+          </button>
+        )}
         <button
           onClick={handleBuyNow}
           className="vep-buynow-btn w-full flex items-center justify-center gap-2 py-4 px-6 font-black text-base rounded-xl active:scale-[0.98] transition-all"
           style={{ backgroundColor: "var(--vep-buynow-bg, #000000)", color: "var(--vep-buynow-text, #FFFFFF)" }}
         >
-          <Zap className="w-5 h-5" />
           Comprar Agora
         </button>
       </div>
@@ -308,7 +313,7 @@ export function ProductPurchase({ product, variants, sizes, selectedColorProp, c
           <div className="px-4 pb-4 border-t text-sm">
             {/* PIX */}
             <div className="mt-3 p-3 bg-green-50 rounded-lg">
-              <p className="font-bold text-green-700">PIX — 5% de desconto</p>
+              <p className="font-bold text-green-700">{pixDiscountPct > 0 ? `PIX — ${pixDiscountPct}% de desconto` : "PIX"}</p>
               <p className="text-green-600 font-semibold text-lg">{formatPrice(pixPrice)}</p>
               <p className="text-xs text-green-600">Aprovação imediata</p>
             </div>

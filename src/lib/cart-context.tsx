@@ -121,6 +121,8 @@ export function CartProvider({ children }: { children: React.ReactNode }) {
       try {
         const fbc = localStorage.getItem("_fbc") || undefined;
         const fbp = localStorage.getItem("_fbp") || undefined;
+        const externalId = localStorage.getItem("_sid") || undefined;
+        const pixelSource = localStorage.getItem("_pxsrc") || undefined;
         fetch("/api/track", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -130,7 +132,7 @@ export function CartProvider({ children }: { children: React.ReactNode }) {
             productName: action.payload.name,
             value: action.payload.price * action.payload.quantity,
             quantity: action.payload.quantity,
-            fbc, fbp,
+            fbc, fbp, externalId, pixelSource,
           }),
         }).catch(() => {});
       } catch {}

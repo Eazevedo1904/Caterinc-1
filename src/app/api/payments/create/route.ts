@@ -3,8 +3,8 @@ import QRCode from "qrcode";
 import { prisma } from "@/lib/prisma";
 import { sanitizeString, sanitizeEmail, sanitizeInt, verifyOrigin } from "@/lib/sanitize";
 import { sendUtmifyEvent } from "@/lib/utmify";
-import { sendMetaEvent } from "@/lib/meta-capi";
-import { vezionConfigured, vezionCreatePix } from "@/lib/vezion";
+import { sendMetaEvent, type PixelSource } from "@/lib/meta-capi";
+import { flevopayConfigured, flevopayCreatePix } from "@/lib/flevopay";
 
 export const dynamic = "force-dynamic";
 export const maxDuration = 30;
@@ -36,12 +36,12 @@ export async function POST(req: NextRequest) {
     personal?: PersonalInput; address?: AddressInput; paymentMethod?: string;
     cartItems?: CartItemInput[]; consent?: boolean; shippingMethodId?: string | null;
     utmData?: Record<string, string> | null;
-    fbc?: string | null; fbp?: string | null;
+    fbc?: string | null; fbp?: string | null; externalId?: string | null; pixelSource?: PixelSource | null;
   };
   try { body = await req.json(); }
   catch { return NextResponse.json({ error: "Payload invalido" }, { status: 400 }); }
 
-  const { personal, address, cartItems, consent, shippingMethodId, utmData, fbc, fbp } = body;
+  const { personal, address, cartItems, consent, shippingMethodId, utmData, fbc, fbp, externalId, pixelSource } = body;
 
   if (!consent) return NextResponse.json({ error: "Consentimento LGPD obrigatorio" }, { status: 400 });
   if (!personal || !address || !cartItems || cartItems.length === 0)
@@ -54,7 +54,7 @@ export async function POST(req: NextRequest) {
   if (!name || !email || !phone) return NextResponse.json({ error: "Dados pessoais invalidos" }, { status: 400 });
   if (cpf.length !== 11) return NextResponse.json({ error: "CPF inválido. Confira se você digitou todos os 11 números corretamente." }, { status: 400 });
 
-  if (!vezionConfigured())
+  if (!flevopayConfigured())
     return NextResponse.json({ error: "Pagamento nao configurado." }, { status: 503 });
 
   const productIds = [...new Set(cartItems.map((i) => i.productId))];
@@ -88,7 +88,14 @@ export async function POST(req: NextRequest) {
     const sm = await prisma.shippingMethod.findUnique({ where: { id: shippingMethodId, isActive: true } });
     if (sm) shippingCost = (sm.freeAbove !== null && subtotal >= Number(sm.freeAbove)) ? 0 : Number(sm.price);
   }
-  const total = Math.round((subtotal + shippingCost) * 100) / 100;
+
+  // This endpoint only ever creates PIX transactions today, so the PIX
+  // discount applies to every order created here. Discount is on the
+  // products only, not on shipping (matches what the product page shows).
+  const pixDiscountSetting = await prisma.siteSetting.findUnique({ where: { key: "pixDiscountPct" } });
+  const pixDiscountPct = pixDiscountSetting ? parseFloat(pixDiscountSetting.value) : 5;
+  const discountedSubtotal = Math.round(subtotal * (1 - pixDiscountPct / 100) * 100) / 100;
+  const total = Math.round((discountedSubtotal + shippingCost) * 100) / 100;
 
   const shippingAddress = {
     name, phone,
@@ -109,23 +116,19 @@ export async function POST(req: NextRequest) {
   const nameParts  = name.split(" ");
   const orderNumber  = `CAT-${Date.now()}-${Math.random().toString(36).slice(2,6).toUpperCase()}`;
   const trackingCode = generateTrackingCode();
-  const itemName     = orderItems.map((i) => i.name.replace(/caterpillar\s*/gi, "").trim()).join(", ").slice(0, 100);
 
-  const clientIp = req.headers.get("x-forwarded-for")?.split(",")[0]?.trim()
-    || req.headers.get("x-real-ip")
-    || null;
-
-  let pixData: Awaited<ReturnType<typeof vezionCreatePix>>;
+  let pixData: Awaited<ReturnType<typeof flevopayCreatePix>>;
   try {
-    pixData = await vezionCreatePix({
+    pixData = await flevopayCreatePix({
       amount: total, orderNumber, name, email, cpf, phone,
-      itemName: itemName || "Pedido",
-      ip: clientIp,
-      utmData: utmData || null, fbc: fbc || null,
+      // Nome genérico de propósito — o gateway não precisa saber qual produto
+      // foi vendido, só o admin (que já tem o detalhe real de cada pedido).
+      itemName: "Pacote Premium",
+      utmData: utmData || null,
     });
   } catch (err) {
     const msg = err instanceof Error ? err.message : "Erro desconhecido";
-    console.error("[Vezion] PIX create error:", msg);
+    console.error("[FlevoPay] PIX create error:", msg);
     return NextResponse.json({ error: "Não foi possível gerar o PIX. Tente novamente em instantes." }, { status: 502 });
   }
 
@@ -145,9 +148,9 @@ export async function POST(req: NextRequest) {
         mpPaymentId: pixData.id,
         trackingCode,
         subtotal, shipping: shippingCost, total, shippingAddress,
-        utmData: { ...(utmData || {}), ...(fbc ? { fbc } : {}), ...(fbp ? { fbp } : {}) },
+        utmData: { ...(utmData || {}), ...(fbc ? { fbc } : {}), ...(fbp ? { fbp } : {}), ...(externalId ? { externalId } : {}), ...(pixelSource ? { pixelSource } : {}) },
         items: { create: orderItems },
-        statusHistory: { create: [{ status: "PENDING", note: "PIX gerado via Vezion" }] },
+        statusHistory: { create: [{ status: "PENDING", note: "PIX gerado via FlevoPay" }] },
       },
     });
     for (const item of orderItems) {
@@ -168,7 +171,7 @@ export async function POST(req: NextRequest) {
     email, phone, firstName: nameParts[0] || null, lastName: nameParts.slice(1).join(" ") || null,
     value: total, currency: "BRL",
     contents: orderItems.map((i) => ({ id: i.productId || "item", quantity: i.quantity })),
-    orderId: orderNumber, fbc: fbc || null, fbp: fbp || null,
+    orderId: orderNumber, fbc: fbc || null, fbp: fbp || null, externalId: externalId || null, pixelSource: pixelSource || null,
   }).catch((e) => console.error("[Meta CAPI] pix pending error:", e));
 
   return NextResponse.json({

@@ -28,12 +28,14 @@ interface Props {
   variants: Variant[];
   sizes: string[];
   discountPct: number;
+  pixDiscountPct: number;
+  skipCart: boolean;
   infoBefore?: ReactNode;
   infoAfter?: ReactNode;
 }
 
 export function ProductPageClient({
-  product, variants, sizes, discountPct, infoBefore, infoAfter,
+  product, variants, sizes, discountPct, pixDiscountPct, skipCart, infoBefore, infoAfter,
 }: Props) {
   const searchParams = useSearchParams();
   const isMirror = searchParams.get("__mirror") === "1";
@@ -43,6 +45,8 @@ export function ProductPageClient({
     try {
       const fbc = localStorage.getItem("_fbc") || undefined;
       const fbp = localStorage.getItem("_fbp") || undefined;
+      const externalId = localStorage.getItem("_sid") || undefined;
+      const pixelSource = localStorage.getItem("_pxsrc") || undefined;
       fetch("/api/track", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -51,7 +55,7 @@ export function ProductPageClient({
           productId: product.id,
           productName: product.name,
           value: product.price,
-          fbc, fbp,
+          fbc, fbp, externalId, pixelSource,
         }),
       }).catch(() => {});
     } catch {}
@@ -137,6 +141,8 @@ export function ProductPageClient({
           product={product}
           variants={variants}
           sizes={sizes}
+          pixDiscountPct={pixDiscountPct}
+          skipCart={skipCart}
           selectedColorProp={selectedColor}
           colorSwatchMap={colorSwatchMap}
           onColorSelect={handleColorSelect}

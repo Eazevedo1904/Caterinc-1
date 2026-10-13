@@ -37,6 +37,12 @@ export default async function ProductPage({ params }: Props) {
   const vpp: Record<string, string> = vppRaw
     ? JSON.parse(vppRaw.value || "{}") : {};
 
+  const pixDiscountRaw = await prisma.siteSetting.findUnique({ where: { key: "pixDiscountPct" } });
+  const pixDiscountPct = pixDiscountRaw ? parseFloat(pixDiscountRaw.value) : 5;
+
+  const skipCartRaw = await prisma.siteSetting.findUnique({ where: { key: "skipCartEnabled" } });
+  const skipCart = skipCartRaw ? JSON.parse(skipCartRaw.value) === true : false;
+
   const product = await prisma.product.findUnique({
     where: { slug: params.slug, isActive: true },
     include: {
@@ -133,6 +139,8 @@ export default async function ProductPage({ params }: Props) {
           }))}
           sizes={sizes}
           discountPct={discountPct}
+          pixDiscountPct={pixDiscountPct}
+          skipCart={skipCart}
           infoBefore={
             <>
               {product.category && (

@@ -1,13 +1,13 @@
 "use client";
 
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import Image from "next/image";
 import Link from "next/link";
-import { useRouter } from "next/navigation";
+import { useRouter, useParams } from "next/navigation";
 import {
   ShieldCheck, Loader2, Copy, Check, ChevronDown, ChevronUp,
   ShoppingBag, Truck, CreditCard, Smartphone, User,
-  Minus, Plus, ArrowLeft,
+  Minus, Plus, ArrowLeft, Paperclip,
 } from "lucide-react";
 import { useCart } from "@/lib/cart-context";
 import { formatPrice, copyToClipboard } from "@/lib/utils";
@@ -30,6 +30,19 @@ function PixIcon({ size = 20 }: { size?: number }) {
 type Stage = "dados" | "endereco" | "pagamento" | "pix";
 type PayMethod = "pix" | "card";
 
+// Cada etapa vira uma URL real (/checkout, /checkout/entrega, /checkout/pagamento,
+// /checkout/pix) pra o botão físico de voltar do celular navegar etapa por etapa
+// em vez de pular tudo pra fora do checkout.
+const STAGE_PATH: Record<Stage, string> = {
+  dados: "/checkout", endereco: "/checkout/entrega", pagamento: "/checkout/pagamento", pix: "/checkout/pix",
+};
+function stageFromSegment(seg: string | undefined): Stage {
+  if (seg === "entrega") return "endereco";
+  if (seg === "pagamento") return "pagamento";
+  if (seg === "pix") return "pix";
+  return "dados";
+}
+
 interface ShippingMethod {
   id: string; name: string; description: string | null;
   price: number; minDays: number | null; maxDays: number | null; freeAbove: number | null;
@@ -39,6 +52,11 @@ interface PixResult    { orderId: string; orderNumber: string; qrCode: string; q
 const STEP_COLOR = "var(--vep-checkout-step-active-bg, #16c789)";
 const STEP_TEXT  = "var(--vep-checkout-step-active-text, #fff)";
 const DONE_COLOR = "var(--vep-checkout-step-done-bg, #16c789)";
+const DONE_TEXT  = "var(--vep-checkout-step-done-text, #fff)";
+const SECTION_NUM_BG   = "var(--vep-checkout-section-num-bg, #FFCD11)";
+const SECTION_NUM_TEXT = "var(--vep-checkout-section-num-text, #000000)";
+const CHECKMARK_BG   = "var(--vep-checkout-checkmark-bg, #16c789)";
+const CHECKMARK_TEXT = "var(--vep-checkout-checkmark-text, #fff)";
 
 // ─── Countdown Timer ──────────────────────────────────────────────────────────
 
@@ -90,8 +108,10 @@ function StepBar({ step }: { step: 0 | 1 | 2 }) {
             <div
               className="w-10 h-10 rounded-lg flex items-center justify-center z-10 border-2 transition-all"
               style={
-                done || active
+                active
                   ? { backgroundColor: STEP_COLOR, borderColor: STEP_COLOR, color: STEP_TEXT }
+                  : done
+                  ? { backgroundColor: DONE_COLOR, borderColor: DONE_COLOR, color: DONE_TEXT }
                   : { backgroundColor: "#fff", borderColor: "#D1D5DB", color: "#9CA3AF" }
               }
             >
@@ -113,6 +133,85 @@ function StepBar({ step }: { step: 0 | 1 | 2 }) {
 // ─── Form helpers ─────────────────────────────────────────────────────────────
 
 const inp = "w-full h-12 px-4 pr-10 border rounded-lg text-[16px] focus:outline-none transition-colors bg-white";
+
+// ─── Phone: country code + local number ────────────────────────────────────────
+// Kept separate so people don't type the country code into the DDD slot by
+// habit (e.g. "55 92 99917-368") — that silently ate a digit and corrupted
+// the DDD, because the old single field just grabbed the first 2 digits.
+
+const COUNTRY_CODES = [
+  { code: "55",  name: "Brasil",        flag: "🇧🇷" },
+  { code: "1",   name: "EUA/Canadá",    flag: "🇺🇸" },
+  { code: "351", name: "Portugal",      flag: "🇵🇹" },
+  { code: "54",  name: "Argentina",     flag: "🇦🇷" },
+  { code: "598", name: "Uruguai",       flag: "🇺🇾" },
+  { code: "595", name: "Paraguai",      flag: "🇵🇾" },
+  { code: "56",  name: "Chile",         flag: "🇨🇱" },
+  { code: "57",  name: "Colômbia",      flag: "🇨🇴" },
+  { code: "51",  name: "Peru",          flag: "🇵🇪" },
+  { code: "58",  name: "Venezuela",     flag: "🇻🇪" },
+  { code: "52",  name: "México",        flag: "🇲🇽" },
+  { code: "34",  name: "Espanha",       flag: "🇪🇸" },
+  { code: "39",  name: "Itália",        flag: "🇮🇹" },
+  { code: "44",  name: "Reino Unido",   flag: "🇬🇧" },
+  { code: "49",  name: "Alemanha",      flag: "🇩🇪" },
+  { code: "33",  name: "França",        flag: "🇫🇷" },
+  { code: "81",  name: "Japão",         flag: "🇯🇵" },
+  { code: "86",  name: "China",         flag: "🇨🇳" },
+  { code: "91",  name: "Índia",         flag: "🇮🇳" },
+  { code: "61",  name: "Austrália",     flag: "🇦🇺" },
+] as const;
+
+function maskLocalPhone(v: string) {
+  const d = v.replace(/\D/g, "").slice(0, 11);
+  if (d.length <= 2) return d;
+  if (d.length <= 7) return `(${d.slice(0,2)}) ${d.slice(2)}`;
+  return `(${d.slice(0,2)}) ${d.slice(2,7)}-${d.slice(7)}`;
+}
+
+function CountryCodeSelect({ value, onChange }: { value: string; onChange: (code: string) => void }) {
+  const [open, setOpen] = useState(false);
+  const ref = useRef<HTMLDivElement>(null);
+  const current = COUNTRY_CODES.find((c) => c.code === value) || COUNTRY_CODES[0];
+
+  useEffect(() => {
+    function onClickOutside(e: MouseEvent) {
+      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
+    }
+    document.addEventListener("mousedown", onClickOutside);
+    return () => document.removeEventListener("mousedown", onClickOutside);
+  }, []);
+
+  return (
+    <div className="relative flex-shrink-0" ref={ref}>
+      <button
+        type="button"
+        onClick={() => setOpen((o) => !o)}
+        className="h-12 px-2.5 border-2 border-gray-200 rounded-lg bg-white flex items-center gap-1 text-[15px] font-medium hover:border-gray-300 transition-colors"
+      >
+        <span>{current.flag}</span>
+        <span>+{current.code}</span>
+        <ChevronDown className="w-3.5 h-3.5 text-gray-400" />
+      </button>
+      {open && (
+        <div className="absolute z-20 top-[calc(100%+4px)] left-0 w-56 max-h-64 overflow-y-auto bg-white border rounded-lg shadow-lg py-1">
+          {COUNTRY_CODES.map((c) => (
+            <button
+              key={c.code}
+              type="button"
+              onClick={() => { onChange(c.code); setOpen(false); }}
+              className={`w-full flex items-center gap-2 px-3 py-2 text-sm text-left hover:bg-gray-50 ${c.code === value ? "bg-gray-50 font-semibold" : ""}`}
+            >
+              <span>{c.flag}</span>
+              <span className="flex-1">{c.name}</span>
+              <span className="text-gray-400">+{c.code}</span>
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
 
 function ValidatedInput({
   label, required = false, valid = false, type = "text", value, onChange, placeholder, inputMode, maxLength, autoComplete,
@@ -136,8 +235,8 @@ function ValidatedInput({
         />
         {valid && (
           <div className="absolute right-3 top-1/2 -translate-y-1/2 w-5 h-5 rounded-full flex items-center justify-center"
-            style={{ backgroundColor: STEP_COLOR }}>
-            <Check className="w-3 h-3 text-white" />
+            style={{ backgroundColor: CHECKMARK_BG }}>
+            <Check className="w-3 h-3" style={{ color: CHECKMARK_TEXT }} />
           </div>
         )}
       </div>
@@ -145,11 +244,17 @@ function ValidatedInput({
   );
 }
 
-function SectionHeader({ num, title }: { num: number; title: string }) {
+function SectionHeader({ num, title, outline = false }: { num: number; title: string; outline?: boolean }) {
   return (
     <div className="flex items-center gap-3 mb-4">
-      <div className="w-7 h-7 rounded-full flex items-center justify-center text-sm font-black flex-shrink-0"
-        style={{ backgroundColor: STEP_COLOR, color: STEP_TEXT }}>
+      <div
+        className="w-7 h-7 rounded-full flex items-center justify-center text-sm font-black flex-shrink-0"
+        style={
+          outline
+            ? { backgroundColor: "transparent", border: `2px solid ${SECTION_NUM_BG}`, color: SECTION_NUM_BG }
+            : { backgroundColor: SECTION_NUM_BG, color: SECTION_NUM_TEXT }
+        }
+      >
         {num}
       </div>
       <h2 className="text-lg font-black text-gray-900">{title}</h2>
@@ -166,12 +271,6 @@ function maskCPF(v: string) {
   if (d.length <= 9) return `${d.slice(0,3)}.${d.slice(3,6)}.${d.slice(6)}`;
   return `${d.slice(0,3)}.${d.slice(3,6)}.${d.slice(6,9)}-${d.slice(9)}`;
 }
-function maskPhone(v: string) {
-  const d = v.replace(/\D/g, "").slice(0, 11);
-  if (d.length <= 2) return d;
-  if (d.length <= 7) return `(${d.slice(0,2)}) ${d.slice(2)}`;
-  return `(${d.slice(0,2)}) ${d.slice(2,7)}-${d.slice(7)}`;
-}
 function maskCEP(v: string) {
   const d = v.replace(/\D/g, "").slice(0, 8);
   if (d.length <= 5) return d;
@@ -184,16 +283,69 @@ export default function CheckoutPage() {
   const { state, total, isHydrated, dispatch } = useCart();
   const { items } = state;
   const router = useRouter();
-
-  const [stage, setStage] = useState<Stage>("dados");
+  const params = useParams<{ step?: string[] }>();
+  const stage = stageFromSegment(params.step?.[0]);
+  const goToStage = useCallback((s: Stage) => router.push(STAGE_PATH[s]), [router]);
   const [loading, setLoading] = useState(false);
   const [cepLoading, setCepLoading] = useState(false);
-  const [summaryOpen, setSummaryOpen] = useState(false);
+  const [summaryOpen, setSummaryOpen] = useState(true);
   // consent removed — hardcoded true in payload
   const [payMethod, setPayMethod] = useState<PayMethod>("pix");
+  const [pixDiscountPct, setPixDiscountPct] = useState(5);
+  const [checkoutLogo, setCheckoutLogo] = useState("");
+  const [checkoutLogoHeight, setCheckoutLogoHeight] = useState(32);
+  const [freeShippingThreshold, setFreeShippingThreshold] = useState<number | null>(null);
+  const [sectionNumberOutline, setSectionNumberOutline] = useState(false);
 
-  const [personal, setPersonal] = useState({ name: "", email: "", cpf: "", phone: "" });
+  useEffect(() => {
+    fetch("/api/settings")
+      .then((r) => r.json())
+      .then((d: { pixDiscountPct?: number; ve_checkout?: { logoImage?: string; sectionNumberOutline?: boolean }; ve_header?: { logoMobileHeight?: number } }) => {
+        if (typeof d.pixDiscountPct === "number") setPixDiscountPct(d.pixDiscountPct);
+        if (d.ve_checkout?.logoImage) setCheckoutLogo(d.ve_checkout.logoImage);
+        if (typeof d.ve_header?.logoMobileHeight === "number") setCheckoutLogoHeight(d.ve_header.logoMobileHeight);
+        if (typeof d.ve_checkout?.sectionNumberOutline === "boolean") setSectionNumberOutline(d.ve_checkout.sectionNumberOutline);
+      })
+      .catch(() => {});
+  }, []);
+
+  // Fetched independently (not gated behind CEP entry, unlike shippingMethods below)
+  // so the free-shipping progress banner has data from the very first screen.
+  useEffect(() => {
+    fetch("/api/shipping").then((r) => r.json()).then((data: ShippingMethod[]) => {
+      const min = data.reduce((m, x) => (x.freeAbove !== null && x.freeAbove < m ? x.freeAbove : m), Infinity);
+      if (Number.isFinite(min)) setFreeShippingThreshold(min);
+    }).catch(() => {});
+  }, []);
+
+  const [personal, setPersonal] = useState({ name: "", email: "", cpf: "", phone: "", phoneCountry: "55" });
   const [address, setAddress] = useState({ zipCode: "", street: "", number: "", complement: "", district: "", city: "", state: "" });
+
+  // Restaura identificação/entrega/forma de pagamento se a página recarregar
+  // do zero (ex: navegador em segundo plano) — sem isso, um reload em
+  // /checkout/entrega ou /checkout/pagamento perderia tudo que já foi
+  // preenchido nas etapas anteriores. `formRestored` só vira true depois da
+  // tentativa de restaurar, e a guarda de acesso direto (mais abaixo) espera
+  // esse sinal antes de decidir se redireciona — sem isso, ela rodaria com
+  // os dados ainda vazios do primeiro render e mandaria embora antes da
+  // restauração completar.
+  const [formRestored, setFormRestored] = useState(false);
+  useEffect(() => {
+    try {
+      const saved = sessionStorage.getItem("_checkout_form");
+      if (saved) {
+        const parsed = JSON.parse(saved) as { personal?: typeof personal; address?: typeof address; payMethod?: PayMethod };
+        if (parsed.personal) setPersonal(parsed.personal);
+        if (parsed.address) setAddress(parsed.address);
+        if (parsed.payMethod) setPayMethod(parsed.payMethod);
+      }
+    } catch {}
+    setFormRestored(true);
+  }, []);
+  useEffect(() => {
+    if (!formRestored) return;
+    try { sessionStorage.setItem("_checkout_form", JSON.stringify({ personal, address, payMethod })); } catch {}
+  }, [formRestored, personal, address, payMethod]);
 
   // Broadcast what the customer is typing (name/email/phone/address only —
   // never CPF or payment data) so the admin's live session view can show it.
@@ -222,6 +374,29 @@ export default function CheckoutPage() {
   const [copied, setCopied] = useState(false);
   const [pixTimer, setPixTimer] = useState(600);
   const [pixPaid,  setPixPaid]  = useState(false);
+  const [proofFile, setProofFile] = useState<File | null>(null);
+  const [proofSending, setProofSending] = useState(false);
+  const [proofSent, setProofSent] = useState(false);
+  const [proofError, setProofError] = useState("");
+
+  const sendProof = useCallback(async () => {
+    if (!proofFile || !pixResult) return;
+    setProofSending(true);
+    setProofError("");
+    try {
+      const fd = new FormData();
+      fd.append("orderId", pixResult.orderId);
+      fd.append("file", proofFile);
+      const res = await fetch("/api/payments/proof", { method: "POST", body: fd });
+      const data = (await res.json()) as { error?: string };
+      if (!res.ok) throw new Error(data.error || "Erro ao enviar comprovante");
+      setProofSent(true);
+    } catch (err) {
+      setProofError(err instanceof Error ? err.message : "Erro ao enviar comprovante");
+    } finally {
+      setProofSending(false);
+    }
+  }, [proofFile, pixResult]);
 
   // Captura fbclid/fbp da URL (vindos da VSL) e dispara InitiateCheckout via CAPI
   useEffect(() => {
@@ -234,54 +409,76 @@ export default function CheckoutPage() {
 
       const fbc = fbclid ? `fb.1.${Date.now()}.${fbclid}` : localStorage.getItem("_fbc");
       const fbp = fbpParam || localStorage.getItem("_fbp");
+      const externalId = localStorage.getItem("_sid") || undefined;
+      const pixelSource = localStorage.getItem("_pxsrc") || undefined;
 
       fetch("/api/payments/initiate", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ fbc, fbp }),
+        body: JSON.stringify({ fbc, fbp, externalId, pixelSource }),
       }).catch(() => {});
 
     } catch {}
   }, []);
 
-  // Restaura PIX do sessionStorage se o cliente recarregar a página
-  // Só restaura se o carrinho estiver vazio (pedido já foi gerado)
+  // Restaura os dados do PIX do sessionStorage sempre que existir um pedido
+  // salvo ainda válido — não só na tela /checkout/pix. `pixResult` também é
+  // usado pra decidir se mostra "carrinho vazio" em QUALQUER etapa (o
+  // carrinho fica vazio de propósito depois que o pedido é criado), então
+  // restaurar só na tela do PIX deixava as outras etapas "achando" que não
+  // existe pedido nenhum sempre que a página remontava (ex: botão físico de
+  // voltar do navegador, que reinicia o componente do zero).
   useEffect(() => {
     if (!isHydrated) return;
     try {
-      if (items.length > 0) {
-        // Novo checkout — descarta qualquer PIX salvo anteriormente
-        sessionStorage.removeItem("_pix_result");
-        return;
-      }
       const saved = sessionStorage.getItem("_pix_result");
-      if (saved) {
-        const parsed = JSON.parse(saved) as PixResult & { savedAt: number; timerLeft: number };
-        const elapsed = Math.floor((Date.now() - parsed.savedAt) / 1000);
-        const remaining = (parsed.timerLeft || 600) - elapsed;
-        if (remaining > 0) {
-          setPixResult(parsed);
-          setStage("pix");
-          setPixTimer(remaining);
-        } else {
-          sessionStorage.removeItem("_pix_result");
-        }
+      if (!saved) return;
+      const parsed = JSON.parse(saved) as PixResult & { savedAt: number; timerLeft: number };
+      const elapsed = Math.floor((Date.now() - parsed.savedAt) / 1000);
+      const remaining = (parsed.timerLeft || 600) - elapsed;
+      if (remaining > 0 && !pixResult) {
+        setPixResult(parsed);
+        setPixTimer(remaining);
+      } else if (remaining <= 0) {
+        sessionStorage.removeItem("_pix_result");
       }
     } catch {}
-  }, [isHydrated, items.length]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isHydrated, stage]);
+
+  // Acesso direto a uma URL de etapa sem ter passado pela anterior (link
+  // salvo, digitado a mão) — manda de volta pra etapa que realmente precisa
+  // ser preenchida primeiro, em vez de mostrar um formulário pela metade.
+  useEffect(() => {
+    if (!isHydrated || !formRestored) return;
+    if (stage === "endereco" && !personal.name) { router.replace("/checkout"); return; }
+    if (stage === "pagamento" && !address.street) { router.replace(personal.name ? "/checkout/entrega" : "/checkout"); return; }
+    if (stage === "pix" && !pixResult) { router.replace(address.street ? "/checkout/pagamento" : "/checkout"); return; }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isHydrated, formRestored, stage, pixResult]);
 
   const shippingCost = selectedShipping
     ? (selectedShipping.freeAbove !== null && total >= selectedShipping.freeAbove ? 0 : selectedShipping.price)
     : 0;
-  const orderTotal = total + shippingCost;
+  const freeShippingReached = freeShippingThreshold !== null && total >= freeShippingThreshold;
+  const missingForFreeShipping = freeShippingThreshold !== null ? Math.max(0, freeShippingThreshold - total) : 0;
+  // Mirrors the server's calculation in /api/payments/create: discount is on
+  // the products only, not on shipping.
+  const discountedTotal = payMethod === "pix" ? total * (1 - pixDiscountPct / 100) : total;
+  const orderTotal = discountedTotal + shippingCost;
 
-  // Load shipping
+  // Load shipping — only once the CEP is valid, so delivery methods/days
+  // don't show up before the customer has entered an address at all.
+  const shippingFetchedRef = useRef(false);
   useEffect(() => {
+    const cepDigits = address.zipCode.replace(/\D/g, "");
+    if (cepDigits.length !== 8 || shippingFetchedRef.current) return;
+    shippingFetchedRef.current = true;
     fetch("/api/shipping").then((r) => r.json()).then((data: ShippingMethod[]) => {
       setShippingMethods(data);
       if (data.length > 0) setSelectedShipping(data[0]);
-    }).catch(() => {});
-  }, []);
+    }).catch(() => { shippingFetchedRef.current = false; });
+  }, [address.zipCode]);
 
   // PIX countdown
   useEffect(() => {
@@ -324,17 +521,25 @@ export default function CheckoutPage() {
       const utmKeys = ['utm_source','utm_medium','utm_campaign','utm_content','utm_term','src','sck'];
       const utmData: Record<string, string> = {};
       try { utmKeys.forEach((k) => { const v = localStorage.getItem('_utm_' + k); if (v) utmData[k] = v; }); } catch {}
-      let fbc: string | null = null; let fbp: string | null = null;
-      try { fbc = localStorage.getItem("_fbc"); fbp = localStorage.getItem("_fbp"); } catch {}
+      let fbc: string | null = null; let fbp: string | null = null; let externalId: string | null = null; let pixelSource: string | null = null;
+      try { fbc = localStorage.getItem("_fbc"); fbp = localStorage.getItem("_fbp"); externalId = localStorage.getItem("_sid"); pixelSource = localStorage.getItem("_pxsrc"); } catch {}
+
+      // Brazil (default) keeps the exact format used everywhere downstream
+      // (FlevoPay, admin WhatsApp links) unchanged; only a non-BR country
+      // prepends its code, since that's genuinely a different number shape.
+      const personalToSend = {
+        name: personal.name, email: personal.email, cpf: personal.cpf,
+        phone: personal.phoneCountry !== "55" ? `+${personal.phoneCountry} ${personal.phone}` : personal.phone,
+      };
 
       const res = await fetch("/api/payments/create", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          personal, address, paymentMethod: payMethod, cardFormData: cardFormData || null,
+          personal: personalToSend, address, paymentMethod: payMethod, cardFormData: cardFormData || null,
           consent: true, shippingMethodId: selectedShipping?.id || null,
           utmData: Object.keys(utmData).length > 0 ? utmData : null,
-          fbc, fbp,
+          fbc, fbp, externalId, pixelSource,
           cartItems: items.map((i) => ({
             productId: i.productId, variantId: i.variantId || null, name: i.name,
             price: i.price, quantity: i.quantity, size: i.size || null, color: i.color || null, image: i.image || null,
@@ -343,16 +548,21 @@ export default function CheckoutPage() {
       });
       const data = (await res.json()) as { error?: string; orderId?: string; orderNumber?: string; total?: number; qrCode?: string; qrCodeBase64?: string; barcode?: string; pdfUrl?: string | null; status?: string; statusDetail?: string; merchantName?: string };
       if (!res.ok) throw new Error(data.error || "Erro ao processar pedido");
-      dispatch({ type: "CLEAR" });
       if (payMethod === "pix") {
+        dispatch({ type: "CLEAR" });
         const pr: PixResult = { orderId: data.orderId!, orderNumber: data.orderNumber!, qrCode: data.qrCode!, qrCodeBase64: data.qrCodeBase64!, total: data.total!, merchantName: data.merchantName };
         setPixResult(pr);
-        setStage("pix");
-        try { sessionStorage.setItem("_pix_result", JSON.stringify({ ...pr, savedAt: Date.now(), timerLeft: 600 })); } catch {}
+        goToStage("pix");
+        try {
+          sessionStorage.setItem("_pix_result", JSON.stringify({ ...pr, savedAt: Date.now(), timerLeft: 600 }));
+        } catch {}
       } else {
         if (data.status === "rejected") {
+          // Card declined: keep the cart intact so the customer can fix the
+          // card and retry, instead of getting bounced to "Carrinho vazio".
           toast({ title: "Cartão recusado", description: data.statusDetail || "Verifique os dados.", variant: "destructive" });
         } else {
+          dispatch({ type: "CLEAR" });
           router.push(`/pedido-confirmado/${data.orderNumber}`);
         }
       }
@@ -361,7 +571,7 @@ export default function CheckoutPage() {
     } finally {
       setLoading(false);
     }
-  }, [personal, address, payMethod, items, dispatch, router, selectedShipping]);
+  }, [personal, address, payMethod, items, dispatch, router, selectedShipping, goToStage]);
 
   const copy = async (text: string) => {
     const ok = await copyToClipboard(text);
@@ -385,7 +595,12 @@ export default function CheckoutPage() {
     </div>
   );
 
-  if (items.length === 0 && stage !== "pix") return (
+  // Carrinho vazio só significa "vá fazer compras" quando não existe nenhum
+  // pedido em andamento — depois de gerar o PIX, o carrinho fica vazio de
+  // propósito (foi limpo ao criar o pedido), e a pessoa pode voltar pras
+  // etapas anteriores (entrega, pagamento) pra conferir ou mudar algo, sem
+  // cair numa tela de "carrinho vazio, vá comprar" no meio do próprio pedido.
+  if (items.length === 0 && stage !== "pix" && !pixResult) return (
     <div className="min-h-screen flex flex-col items-center justify-center gap-4 px-4 text-center bg-gray-50">
       <ShoppingBag className="w-16 h-16 text-gray-200" />
       <h2 className="text-xl font-bold text-gray-700">Carrinho vazio</h2>
@@ -528,10 +743,49 @@ export default function CheckoutPage() {
                   <ShieldCheck className="w-5 h-5 flex-shrink-0 mt-0.5" style={{ color: "#16c789" }} />
                   <div>
                     <p className="text-xs font-black text-gray-700">Beneficiário do pagamento</p>
-                    <p className="text-sm font-bold text-gray-900 mt-0.5">{pixResult.merchantName || "ZENYX INTERMEDIAÇÕES LTDA"}</p>
+                    <p className="text-sm font-bold text-gray-900 mt-0.5">{pixResult.merchantName || "PAGO COMERCIO DIGITAL E R"}</p>
                     <p className="text-xs text-gray-400 mt-0.5">Os pagamentos são processados exclusivamente em nome deste CNPJ. Verifique no app do seu banco antes de confirmar.</p>
                   </div>
                 </div>
+              </div>
+
+              {/* Anexar comprovante */}
+              <div className="bg-white rounded-2xl shadow-sm px-5 py-4">
+                <div className="flex items-start gap-3 mb-3">
+                  <Paperclip className="w-5 h-5 flex-shrink-0 mt-0.5 text-gray-400" />
+                  <div>
+                    <p className="text-xs font-black text-gray-700">Já pagou?</p>
+                    <p className="text-xs text-gray-400 mt-0.5">
+                      Isso é opcional — anexar o comprovante só ajuda a confirmar seu pagamento mais rápido.
+                    </p>
+                  </div>
+                </div>
+                {proofSent ? (
+                  <div className="flex items-center gap-2 text-sm font-bold text-green-600 bg-green-50 border border-green-200 rounded-xl px-4 py-3">
+                    <Check className="w-4 h-4 flex-shrink-0" /> Comprovante enviado, obrigado!
+                  </div>
+                ) : (
+                  <div className="space-y-2">
+                    <label className="flex items-center justify-center gap-2 w-full h-11 border-2 border-dashed border-gray-200 rounded-xl text-sm font-semibold text-gray-500 cursor-pointer hover:border-gray-300 transition-colors">
+                      {proofFile ? proofFile.name : "Escolher arquivo (imagem ou PDF)"}
+                      <input
+                        type="file"
+                        accept="image/png,image/jpeg,image/webp,application/pdf"
+                        className="hidden"
+                        onChange={(e) => { setProofFile(e.target.files?.[0] || null); setProofError(""); }}
+                      />
+                    </label>
+                    {proofError && <p className="text-xs text-red-500">{proofError}</p>}
+                    <button
+                      onClick={sendProof}
+                      disabled={!proofFile || proofSending}
+                      className="w-full h-11 flex items-center justify-center gap-2 font-black text-sm rounded-xl transition-all active:scale-[0.98] disabled:opacity-40"
+                      style={{ backgroundColor: "#111", color: "#fff" }}
+                    >
+                      {proofSending ? <><Loader2 className="w-4 h-4 animate-spin" /> Enviando...</> : "Enviar comprovante"}
+                    </button>
+                  </div>
+                )}
               </div>
 
               {/* Rodapé de segurança */}
@@ -569,30 +823,58 @@ export default function CheckoutPage() {
     <div className="min-h-[100dvh] flex flex-col" style={{ backgroundColor: "var(--vep-checkout-page-bg,#F5F5F5)" }}>
 
       {/* ── Top header ──────────────────────────────────────────────────────── */}
-      <div className="border-b flex-shrink-0" style={{ backgroundColor: "var(--vep-checkout-header-bg,#fff)" }}>
-        <div className="max-w-lg mx-auto px-4 py-3 flex items-center justify-end">
-          <div className="flex items-center gap-1.5 text-xs font-bold text-gray-600">
-            <ShieldCheck className="w-4 h-4" style={{ color: "var(--vep-checkout-step-done-bg,#16c789)" }} />
-            <span className="uppercase tracking-wide text-[10px] leading-tight">PAGAMENTO<br/>100% SEGURO</span>
+      {checkoutLogo && (
+        <div className="border-b flex-shrink-0" style={{ backgroundColor: "var(--vep-checkout-header-bg,#fff)" }}>
+          <div className="max-w-lg mx-auto px-4 py-3 flex items-center justify-center">
+            <Image
+              src={checkoutLogo}
+              alt="Logo"
+              width={200}
+              height={checkoutLogoHeight}
+              style={{ height: `${checkoutLogoHeight}px`, width: "auto", objectFit: "contain" }}
+            />
           </div>
         </div>
-      </div>
+      )}
 
       {/* ── Urgency banner ──────────────────────────────────────────────────── */}
       <div className="bg-white border-b flex-shrink-0">
         <div className="max-w-lg mx-auto px-4 py-3 text-center">
-          <p className="font-black text-base text-gray-900">
-            Desconto e Frete grátis apenas hoje!
-          </p>
-          <p className="text-sm text-gray-600 mt-0.5 flex items-center justify-center gap-2 flex-wrap">
-            Você tem <CountdownTimer seconds={300} /> para finalizar seu pedido
-          </p>
+          {freeShippingReached ? (
+            <>
+              <p className="font-black text-base text-gray-900">
+                Frete grátis desbloqueado!
+              </p>
+              <p className="text-sm text-gray-600 mt-0.5 flex items-center justify-center gap-2 flex-wrap">
+                Garanta em <CountdownTimer seconds={300} /> antes que expire
+              </p>
+            </>
+          ) : freeShippingThreshold !== null ? (
+            <p className="font-black text-base text-gray-900">
+              Faltam {formatPrice(missingForFreeShipping)} para o frete grátis!
+            </p>
+          ) : (
+            <>
+              <p className="font-black text-base text-gray-900">
+                Desconto e Frete grátis apenas hoje!
+              </p>
+              <p className="text-sm text-gray-600 mt-0.5 flex items-center justify-center gap-2 flex-wrap">
+                Você tem <CountdownTimer seconds={300} /> para finalizar seu pedido
+              </p>
+            </>
+          )}
         </div>
       </div>
 
       {/* ── Scrollable content ──────────────────────────────────────────────── */}
       <div className="flex-1 overflow-y-auto">
         <div className="max-w-lg mx-auto px-4 pt-5 pb-6">
+
+          {/* Security note — at the start of the steps */}
+          <div className="flex items-center justify-center gap-1 text-[10px] font-semibold text-gray-400 uppercase tracking-wide mb-3">
+            <ShieldCheck className="w-3 h-3" style={{ color: "#16c789" }} />
+            <span>Pagamento 100% seguro</span>
+          </div>
 
           {/* Step bar */}
           <StepBar step={stepIdx as 0 | 1 | 2} />
@@ -667,9 +949,12 @@ export default function CheckoutPage() {
           {stage === "dados" && (
             <div className="bg-white rounded-xl border p-4">
               <div className="flex items-center justify-between mb-1">
-                <SectionHeader num={1} title="Identificação" />
-                <Link href="/carrinho" className="flex items-center gap-1 text-xs text-gray-400 hover:text-gray-700 transition-colors">
-                  <ArrowLeft className="w-3.5 h-3.5" />
+                <SectionHeader num={1} title="Identificação" outline={sectionNumberOutline} />
+                <Link
+                  href="/carrinho"
+                  className="flex items-center gap-1.5 text-sm font-bold px-3 py-1.5 rounded-lg border-2 border-gray-200 text-gray-700 hover:bg-gray-50 hover:border-gray-300 transition-colors"
+                >
+                  <ArrowLeft className="w-4 h-4" />
                   Voltar ao carrinho
                 </Link>
               </div>
@@ -686,9 +971,31 @@ export default function CheckoutPage() {
                 <ValidatedInput label="CPF" required valid={vCpf}
                   value={personal.cpf} onChange={(v) => setPersonal((p) => ({ ...p, cpf: maskCPF(v) }))}
                   placeholder="000.000.000-00" inputMode="numeric" />
-                <ValidatedInput label="Celular / WhatsApp" required valid={vPhone} type="tel"
-                  value={personal.phone} onChange={(v) => setPersonal((p) => ({ ...p, phone: maskPhone(v) }))}
-                  placeholder="(11) 99999-9999" inputMode="tel" autoComplete="tel" />
+                <div>
+                  <label className="block text-sm font-semibold text-gray-700 mb-1">
+                    Celular / WhatsApp<span className="text-red-500 ml-0.5">*</span>
+                  </label>
+                  <div className="flex gap-2">
+                    <CountryCodeSelect
+                      value={personal.phoneCountry}
+                      onChange={(code) => setPersonal((p) => ({ ...p, phoneCountry: code }))}
+                    />
+                    <div className="relative flex-1">
+                      <input
+                        type="tel" value={personal.phone}
+                        onChange={(e) => setPersonal((p) => ({ ...p, phone: maskLocalPhone(e.target.value) }))}
+                        placeholder="(11) 99999-9999" inputMode="tel" autoComplete="tel"
+                        className={`${inp} border-2 border-gray-200 focus:border-gray-400`}
+                      />
+                      {vPhone && (
+                        <div className="absolute right-3 top-1/2 -translate-y-1/2 w-5 h-5 rounded-full flex items-center justify-center"
+                          style={{ backgroundColor: CHECKMARK_BG }}>
+                          <Check className="w-3 h-3" style={{ color: CHECKMARK_TEXT }} />
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                </div>
               </div>
             </div>
           )}
@@ -696,7 +1003,7 @@ export default function CheckoutPage() {
           {/* ── Step 2: Entrega ────────────────────────────────────────────── */}
           {stage === "endereco" && (
             <div className="bg-white rounded-xl border p-4">
-              <SectionHeader num={2} title="Entrega" />
+              <SectionHeader num={2} title="Entrega" outline={sectionNumberOutline} />
               <div className="space-y-3">
                 <div className="relative">
                   <ValidatedInput label="CEP" required valid={vZip}
@@ -704,6 +1011,9 @@ export default function CheckoutPage() {
                     onChange={(v) => { const m = maskCEP(v); setAddress((a) => ({ ...a, zipCode: m })); if (m.replace(/\D/g,"").length === 8) lookupCep(m); }}
                     placeholder="00000-000" inputMode="numeric" maxLength={9} />
                   {cepLoading && <div className="absolute right-3 bottom-3"><Loader2 className="w-4 h-4 animate-spin text-gray-400" /></div>}
+                  {!vZip && (
+                    <p className="text-xs text-gray-400 mt-1">Coloque seu CEP para calcular o frete</p>
+                  )}
                 </div>
                 <ValidatedInput label="Rua / Avenida" required valid={vStreet}
                   value={address.street} onChange={(v) => setAddress((a) => ({ ...a, street: v }))}
@@ -777,7 +1087,7 @@ export default function CheckoutPage() {
           {/* ── Step 3: Pagamento ──────────────────────────────────────────── */}
           {stage === "pagamento" && (
             <div className="bg-white rounded-xl border p-4 space-y-4">
-              <SectionHeader num={3} title="Pagamento" />
+              <SectionHeader num={3} title="Pagamento" outline={sectionNumberOutline} />
               <div className="space-y-2">
                 {([
                   { id: "pix",  label: "PIX",               desc: "Aprovação instantânea · Sem taxas", badge: "Recomendado" },
@@ -848,7 +1158,7 @@ export default function CheckoutPage() {
                   toast({ title: "Preencha todos os campos obrigatórios", variant: "destructive" });
                   return;
                 }
-                setStage("endereco");
+                goToStage("endereco");
               }}
               className="w-full h-14 rounded-xl flex items-center justify-center gap-2 transition-all active:scale-[0.98] shadow-md"
               style={{ backgroundColor: "var(--vep-checkout-continue-bg,#16c789)", color: "var(--vep-checkout-continue-text,#fff)", fontSize: "1rem", fontWeight: 700, letterSpacing: "0.01em" }}
@@ -866,7 +1176,7 @@ export default function CheckoutPage() {
                   if (shippingMethods.length > 0 && !selectedShipping) {
                     toast({ title: "Selecione um método de entrega", variant: "destructive" }); return;
                   }
-                  setStage("pagamento");
+                  goToStage("pagamento");
                 }}
                 className="w-full h-14 rounded-xl flex items-center justify-center gap-2 transition-all active:scale-[0.98] shadow-md"
                 style={{ backgroundColor: "var(--vep-checkout-continue-bg,#16c789)", color: "var(--vep-checkout-continue-text,#fff)", fontSize: "1rem", fontWeight: 700, letterSpacing: "0.01em" }}
@@ -874,7 +1184,7 @@ export default function CheckoutPage() {
                 Ir para o pagamento &nbsp;→
               </button>
               <button
-                onClick={() => setStage("dados")}
+                onClick={() => goToStage("dados")}
                 className="w-full h-10 rounded-xl flex items-center justify-center gap-1.5 text-sm font-semibold text-gray-500 hover:text-gray-700 transition-colors"
               >
                 ← Voltar para identificação
@@ -894,7 +1204,7 @@ export default function CheckoutPage() {
                   : <>Finalizar pedido &nbsp;→</>}
               </button>
               <button
-                onClick={() => setStage("endereco")}
+                onClick={() => goToStage("endereco")}
                 disabled={loading}
                 className="w-full h-10 rounded-xl flex items-center justify-center gap-1.5 text-sm font-semibold text-gray-500 hover:text-gray-700 disabled:opacity-40 transition-colors"
               >
@@ -903,7 +1213,7 @@ export default function CheckoutPage() {
             </>
           )}
           <div className="flex items-center justify-center gap-1.5 text-[11px] text-gray-400">
-            <ShieldCheck className="w-3.5 h-3.5" style={{ color: STEP_COLOR }} />
+            <ShieldCheck className="w-3.5 h-3.5" style={{ color: "#16c789" }} />
             Pagamento 100% seguro
           </div>
         </div>

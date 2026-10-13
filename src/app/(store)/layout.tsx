@@ -56,7 +56,7 @@ export default async function StoreLayout({ children }: { children: React.ReactN
     <div className="flex flex-col min-h-screen overflow-x-hidden w-full">
       {/* suppressHydrationWarning: CSS vars from DB can differ between SSR and client, that's expected */}
       <style suppressHydrationWarning dangerouslySetInnerHTML={{ __html: `:root{${globalCss}}` }} />
-      <script suppressHydrationWarning dangerouslySetInnerHTML={{ __html: `(function(){try{var p=new URLSearchParams(window.location.search);var keys=['utm_source','utm_medium','utm_campaign','utm_content','utm_term','src','sck'];var found=false;keys.forEach(function(k){if(p.get(k)){localStorage.setItem('_utm_'+k,p.get(k));found=true;}});if(found)localStorage.setItem('_utm_ts',Date.now().toString());}catch(e){}})();` }} />
+      <script suppressHydrationWarning dangerouslySetInnerHTML={{ __html: `(function(){try{var p=new URLSearchParams(window.location.search);var keys=['utm_source','utm_medium','utm_campaign','utm_content','utm_term','src','sck'];var found=false;keys.forEach(function(k){if(p.get(k)){localStorage.setItem('_utm_'+k,p.get(k));found=true;}});if(found)localStorage.setItem('_utm_ts',Date.now().toString());var fbclid=p.get('fbclid');if(fbclid)localStorage.setItem('_fbc','fb.1.'+Date.now()+'.'+fbclid);var fbp=p.get('fbp');if(fbp)localStorage.setItem('_fbp',fbp);var px=p.get('px');if(px)localStorage.setItem('_pxsrc',px);var vsid=p.get('sid');if(vsid){localStorage.setItem('_sid',vsid);}else if(!localStorage.getItem('_sid')){localStorage.setItem('_sid',Math.random().toString(36).slice(2)+Date.now().toString(36));}}catch(e){}})();` }} />
       <MetaPageView />
       <PresenceTracker />
       <SessionRecorder />
@@ -69,7 +69,16 @@ export default async function StoreLayout({ children }: { children: React.ReactN
         logoMobileHeight={Number(vh.logoMobileHeight) || 32}
         headerBgColor={(vh.bgColor as string) || undefined}
         headerLinkColor={(vh.linkColor as string) || undefined}
-        announcementText={(va.text as string) || (sm.announcementText as string) || undefined}
+        announcementTexts={(() => {
+          const raw = va.texts;
+          const arr = Array.isArray(raw)
+            ? raw.filter((t): t is string => typeof t === "string" && t.trim().length > 0)
+            : [];
+          if (arr.length > 0) return arr;
+          const legacy = (va.text as string) || (sm.announcementText as string) || undefined;
+          return legacy ? [legacy] : undefined;
+        })()}
+        announcementIntervalSeconds={Number(va.intervalSeconds) || undefined}
         announcementBgColor={(va.bgColor as string) || undefined}
         announcementTextColor={(va.textColor as string) || undefined}
       />
